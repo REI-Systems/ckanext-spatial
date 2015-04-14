@@ -32,7 +32,13 @@ from ckanext.spatial.validation import Validators, all_validators
 from ckanext.spatial.model import ISODocument
 from ckanext.spatial.interfaces import ISpatialHarvester
 
+import usginmodels
+import requests
+from ckanext.metadata.logic import action as get_meta_action
+import csv
+
 log = logging.getLogger(__name__)
+
 
 DEFAULT_VALIDATOR_PROFILES = ['iso19139']
 
@@ -497,7 +503,9 @@ class SpatialHarvester(HarvesterBase):
 
 
         # Build the package dict
+        
         package_dict = self.get_package_dict(iso_values, harvest_object)
+        
         for harvester in p.PluginImplementations(ISpatialHarvester):
             package_dict = harvester.get_package_dict(context, {
                 'package_dict': package_dict,
@@ -505,6 +513,67 @@ class SpatialHarvester(HarvesterBase):
                 'xml_tree': iso_parser.xml_tree,
                 'harvest_object': harvest_object,
             })
+         
+        #check if dataset confirms to one of USGIN models 
+        if package_dict.has_key('tags'):   
+            model_tag_exists = any(tag['name'].startswith('usgincm:') for tag in package_dict['tags'])
+            
+            usgin_tag = []
+            for tag in package_dict['tags']:
+                if tag['name'].startswith('usgincm:'):
+                    usgin_tag.append(tag['name']) 
+        
+            #check if USGIN dataset has CSV resource
+            if model_tag_exists:
+                if package_dict.has_key('resources'):
+                    csv_exist = any(resource['format'] == 'text/csv' for resource in package_dict['resources'])
+                
+                #if CSV resource exists do resource validation
+                if csv_exist:
+                    error_exists = False                                 
+                    for resource in package_dict['resources']:
+                        if resource['format'] == 'text/csv':
+                            log.debug("Start USGIN content model validation")
+                            csv_file = urllib2.urlopen(resource['url']).read().splitlines()   
+                            csv_text = csv.DictReader(csv_file)               
+                        
+                            # intializing variables to resove this issue:
+                            # Error - <type 'exceptions.UnboundLocalError'>: local variable 'valid, messages ...' referenced before assignment
+                            valid = False
+                            messages = None
+                            dataCorrected = None
+                            long_fields = None
+                            srs = None
+                                                     
+                            for key,value in (get_meta_action.get_usgin_prefix()).iteritems():
+                                if reduce(lambda v1,v2: v1 or v2, map(lambda v: v in usgin_tag, value)):
+                                    key_arr = key.split("+")
+                                    break
+                            
+                            layer = usginmodels.get_layer(key_arr[2], key_arr[1])
+                            
+                            valid, messages, dataCorrected, long_fields, srs = layer.validate_file(csv_text, True) 
+                            
+                            if valid and messages:
+                                if dataCorrected:
+                                    log.error('%s: USGIN document is valid with below mentioned changes' % resource['name'])
+                                    self._save_object_error('{0} USGIN document is valid with below mentioned changes: {1}'.format(resource['name'], messages), harvest_object, 'Import')
+                                    error_exists = True
+                             
+                            log.debug("End USGIN content model validation")
+                            
+                            if not valid and not messages:
+                                log.error('%s: USGIN document is not valid' % resource['name'])
+                                self._save_object_error('{0} USGIN document is not valid'.format(resource['name']), harvest_object, 'Import')
+                                error_exists = True
+                            
+                        else:
+                            self._save_object_error('{0} the file format is not supported for resource {1}.'.format(resource['format'], resource['name']), harvest_object, 'Import')
+                            error_exists = True
+                        
+                if error_exists:
+                    return False
+                
         if not package_dict:
             log.error('No package dict returned, aborting import for object {0}'.format(harvest_object.id))
             return False
