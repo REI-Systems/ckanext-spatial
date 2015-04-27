@@ -36,8 +36,14 @@ import usginmodels
 import requests
 from ckanext.metadata.logic import action as get_meta_action
 import csv
+from ckanext.datastore.logic import action as get_datastore_action
+from ckanext.datastore import db as db
 
 log = logging.getLogger(__name__)
+
+
+#logging.basicConfig()
+#logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
 
 
 DEFAULT_VALIDATOR_PROFILES = ['iso19139']
@@ -112,6 +118,66 @@ def guess_resource_format(url, use_mimetypes=True):
 
     return None
 
+def format_records_datastore(data, data_header):
+    out = []
+    type_arr = []
+    count = 0
+    for row in data:
+        i = 0    
+        for item in row:
+            if count == 0:
+                type = db._guess_type(item)
+                type_arr.append(type)
+                
+                if type == 'integer' and (int(item) < -2147483648 or int(item) > 2147483647):
+                    type_arr[i] = 'numeric'
+                  
+            if item:
+                if type_arr[i] == 'integer':
+                    row[i] = int(item)
+                elif type_arr[i] == 'numeric':
+                    row[i] = float(item)
+            else:
+                row[i] = None
+            
+            i = i + 1
+        out.append(dict(zip(data_header, row)))   
+        count = count + 1            
+                                 
+    out = json.dumps(out)
+            
+    return out
+
+def upload_csv_datastore(csv_file_arr, package_id, context):
+    package_dict = logic.get_action('package_show')(context, {'id': package_id})
+                
+    for resource in package_dict['resources']:
+        if resource['format'].lower() == 'csv':
+            log.debug(resource['name'])
+            if resource['url'] in csv_file_arr.keys():                  
+                data_dict = {
+                                "resource_id": resource['id'],
+                                "force": True,
+                                "records": json.loads(csv_file_arr[resource['url']]),
+                            }
+            else:
+                csv_file = urllib2.urlopen(resource['url']).read().splitlines()              
+                reader = csv.reader(csv_file)  
+                data_header = next(reader, None)
+                
+                out = format_records_datastore(reader, data_header)
+                
+                data_dict = {
+                                "resource_id": resource['id'],
+                                "force": True,
+                                "records": json.loads(out),
+                            } 
+            
+            try:                  
+                get_datastore_action.datastore_create(context, data_dict)
+                log.info("CSV file for Resource %s uploaded to Datastore.", resource['name'])
+            except Exception, e:
+                log.error("There was error while uploading CSV file for Resource %s to datastore due to following errors %s", resource['name'], str(e))
 
 class SpatialHarvester(HarvesterBase):
 
@@ -514,6 +580,8 @@ class SpatialHarvester(HarvesterBase):
                 'harvest_object': harvest_object,
             })
          
+        log.info('Package name: %s', package_dict['name']) 
+        csv_file_arr = {} 
         #check if dataset confirms to one of USGIN models 
         if package_dict.has_key('tags'):   
             model_tag_exists = any(tag['name'].startswith('usgincm:') for tag in package_dict['tags'])
@@ -530,10 +598,10 @@ class SpatialHarvester(HarvesterBase):
                 
                 #if CSV resource exists do resource validation
                 if csv_exist:
-                    error_exists = False                                 
+                    error_exists = False                                
                     for resource in package_dict['resources']:
                         if resource['format'] == 'text/csv':
-                            log.debug("Start USGIN content model validation")
+                            log.info("Start USGIN content model validation")
                             csv_file = urllib2.urlopen(resource['url']).read().splitlines()   
                             csv_text = csv.DictReader(csv_file)               
                         
@@ -544,7 +612,8 @@ class SpatialHarvester(HarvesterBase):
                             dataCorrected = None
                             long_fields = None
                             srs = None
-                                                     
+                             
+                            #get Model, Layer, Version URI based on usgincm tags                          
                             for key,value in (get_meta_action.get_usgin_prefix()).iteritems():
                                 if reduce(lambda v1,v2: v1 or v2, map(lambda v: v in usgin_tag, value)):
                                     key_arr = key.split("+")
@@ -556,21 +625,22 @@ class SpatialHarvester(HarvesterBase):
                             
                             if valid and messages:
                                 if dataCorrected:
-                                    log.error('%s: USGIN document is valid with below mentioned changes' % resource['name'])
-                                    self._save_object_error('{0} USGIN document is valid with below mentioned changes: {1}'.format(resource['name'], messages), harvest_object, 'Import')
-                                    error_exists = True
-                             
-                            log.debug("End USGIN content model validation")
-                            
+                                    data_header = dataCorrected.pop(0)
+                                    out = format_records_datastore(dataCorrected, data_header) 
+                                    csv_file_arr[resource['url']] = out
+                                    self._save_object_error('The file for resource {0} is valid with following changes {1}.'.format(resource['name'], messages), harvest_object, 'Import')
+                                    
                             if not valid and not messages:
                                 log.error('%s: USGIN document is not valid' % resource['name'])
                                 self._save_object_error('{0} USGIN document is not valid'.format(resource['name']), harvest_object, 'Import')
                                 error_exists = True
+                                        
+                            log.info("End USGIN content model validation")
                             
                         else:
                             self._save_object_error('{0} the file format is not supported for resource {1}.'.format(resource['format'], resource['name']), harvest_object, 'Import')
                             error_exists = True
-                        
+                       
                 if error_exists:
                     return False
                 
@@ -617,11 +687,13 @@ class SpatialHarvester(HarvesterBase):
 
             try:
                 package_id = p.toolkit.get_action('package_create')(context, package_dict)
-                log.info('Created new package %s with guid %s', package_id, harvest_object.guid)
+                log.info('Created new package %s with guid %s', package_id, harvest_object.guid)   
             except p.toolkit.ValidationError, e:
                 self._save_object_error('Validation Error: %s' % str(e.error_summary), harvest_object, 'Import')
                 return False
 
+            upload_csv_datastore(csv_file_arr, package_id, context)
+    
         elif status == 'change':
 
             # Check if the modified date is more recent
@@ -667,11 +739,13 @@ class SpatialHarvester(HarvesterBase):
                 except p.toolkit.ValidationError, e:
                     self._save_object_error('Validation Error: %s' % str(e.error_summary), harvest_object, 'Import')
                     return False
+                    
+                upload_csv_datastore(csv_file_arr, package_id, context)
 
         model.Session.commit()
 
         return True
-    ##
+    ##        
 
     def _is_wms(self, url):
         '''
