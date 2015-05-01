@@ -42,10 +42,6 @@ from ckanext.datastore import db as db
 log = logging.getLogger(__name__)
 
 
-#logging.basicConfig()
-#logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
-
-
 DEFAULT_VALIDATOR_PROFILES = ['iso19139']
 
 
@@ -134,7 +130,10 @@ def format_records_datastore(data, data_header):
                   
             if item:
                 if type_arr[i] == 'integer':
-                    row[i] = int(item)
+                    try:
+                        row[i] = int(item)
+                    except ValueError:
+                        row[i] = float(item)
                 elif type_arr[i] == 'numeric':
                     row[i] = float(item)
             else:
@@ -153,7 +152,6 @@ def upload_csv_datastore(csv_file_arr, package_id, context):
                 
     for resource in package_dict['resources']:
         if resource['format'].lower() == 'csv':
-            log.debug(resource['name'])
             if resource['url'] in csv_file_arr.keys():                  
                 data_dict = {
                                 "resource_id": resource['id'],
@@ -579,8 +577,7 @@ class SpatialHarvester(HarvesterBase):
                 'xml_tree': iso_parser.xml_tree,
                 'harvest_object': harvest_object,
             })
-         
-        log.info('Package name: %s', package_dict['name']) 
+          
         csv_file_arr = {} 
         #check if dataset confirms to one of USGIN models 
         if package_dict.has_key('tags'):   
@@ -630,7 +627,7 @@ class SpatialHarvester(HarvesterBase):
                                     csv_file_arr[resource['url']] = out
                                     self._save_object_error('The file for resource {0} is valid with following changes {1}.'.format(resource['name'], messages), harvest_object, 'Import')
                                     
-                            if not valid and not messages:
+                            if not valid:
                                 log.error('%s: USGIN document is not valid' % resource['name'])
                                 self._save_object_error('{0} USGIN document is not valid'.format(resource['name']), harvest_object, 'Import')
                                 error_exists = True
