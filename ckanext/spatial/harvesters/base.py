@@ -638,8 +638,8 @@ class SpatialHarvester(HarvesterBase):
                             self._save_object_error('{0} the file format is not supported for resource {1}.'.format(resource['format'], resource['name']), harvest_object, 'Import')
                             error_exists = True
                        
-                if error_exists:
-                    return False
+                    if error_exists:
+                        return False
                 
         if not package_dict:
             log.error('No package dict returned, aborting import for object {0}'.format(harvest_object.id))
