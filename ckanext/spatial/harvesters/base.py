@@ -133,7 +133,10 @@ def format_records_datastore(data, data_header):
                     try:
                         row[i] = int(item)
                     except ValueError:
-                        row[i] = float(item)
+                        try:
+                            row[i] = float(item)
+                        except ValueError:
+                            row[i] = None
                 elif type_arr[i] == 'numeric':
                     row[i] = float(item)
             else:
@@ -151,31 +154,19 @@ def upload_csv_datastore(csv_file_arr, package_id, context):
     package_dict = logic.get_action('package_show')(context, {'id': package_id})
                 
     for resource in package_dict['resources']:
-        if resource['format'].lower() == 'csv':
+        if "NGDS Tier 3 Data, csv format:".lower() in resource['name'].lower():
             if resource['url'] in csv_file_arr.keys():                  
                 data_dict = {
                                 "resource_id": resource['id'],
                                 "force": True,
                                 "records": json.loads(csv_file_arr[resource['url']]),
                             }
-            else:
-                csv_file = urllib2.urlopen(resource['url']).read().splitlines()              
-                reader = csv.reader(csv_file)  
-                data_header = next(reader, None)
-                
-                out = format_records_datastore(reader, data_header)
-                
-                data_dict = {
-                                "resource_id": resource['id'],
-                                "force": True,
-                                "records": json.loads(out),
-                            } 
-            
-            try:                  
-                get_datastore_action.datastore_create(context, data_dict)
-                log.info("CSV file for Resource %s uploaded to Datastore.", resource['name'])
-            except Exception, e:
-                log.error("There was error while uploading CSV file for Resource %s to datastore due to following errors %s", resource['name'], str(e))
+                try:                  
+                    get_datastore_action.datastore_create(context, data_dict)
+                    log.info("CSV file for Resource %s uploaded to Datastore.", resource['name'])
+                except Exception, e:
+                    log.error("There was error while uploading CSV file for Resource %s to datastore due to following errors %s", resource['name'], str(e))
+
 
 class SpatialHarvester(HarvesterBase):
 
@@ -581,24 +572,24 @@ class SpatialHarvester(HarvesterBase):
         csv_file_arr = {} 
         #check if dataset confirms to one of USGIN models 
         if package_dict.has_key('tags'):   
-            model_tag_exists = any(tag['name'].startswith('usgincm:') for tag in package_dict['tags'])
+            model_tag_exists = any(tag['name'].lower().startswith('usgincm:') for tag in package_dict['tags'])
             
             usgin_tag = []
             for tag in package_dict['tags']:
-                if tag['name'].startswith('usgincm:'):
-                    usgin_tag.append(tag['name']) 
+                if tag['name'].lower().startswith('usgincm:'):
+                    usgin_tag.append(tag['name'].lower()) 
         
             #check if USGIN dataset has CSV resource
             if model_tag_exists:
                 if package_dict.has_key('resources'):
-                    csv_exist = any(resource['format'] == 'text/csv' for resource in package_dict['resources'])
+                    csv_exist = any("NGDS Tier 3 Data, csv format:".lower() in resource['name'].lower() for resource in package_dict['resources'])
                 
                 #if CSV resource exists do resource validation
-                if csv_exist:
-                    error_exists = False                                
+                if csv_exist:                               
                     for resource in package_dict['resources']:
-                        if resource['format'] == 'text/csv':
+                        if "NGDS Tier 3 Data, csv format:".lower() in resource['name'].lower():
                             log.info("Start USGIN content model validation")
+                            
                             csv_file = urllib2.urlopen(resource['url']).read().splitlines()   
                             csv_text = csv.DictReader(csv_file)               
                         
@@ -610,36 +601,41 @@ class SpatialHarvester(HarvesterBase):
                             long_fields = None
                             srs = None
                              
+                            key_arr = [] 
                             #get Model, Layer, Version URI based on usgincm tags                          
                             for key,value in (get_meta_action.get_usgin_prefix()).iteritems():
+                                value = [x.lower() for x in value]
                                 if reduce(lambda v1,v2: v1 or v2, map(lambda v: v in usgin_tag, value)):
                                     key_arr = key.split("+")
                                     break
                             
-                            layer = usginmodels.get_layer(key_arr[2], key_arr[1])
+                            if len(key_arr) > 0:
+                                layer = usginmodels.get_layer(key_arr[2], key_arr[1])
                             
-                            valid, messages, dataCorrected, long_fields, srs = layer.validate_file(csv_text, True) 
+                                valid, messages, dataCorrected, long_fields, srs = layer.validate_file(csv_text, True) 
                             
-                            if valid and messages:
-                                if dataCorrected:
-                                    data_header = dataCorrected.pop(0)
-                                    out = format_records_datastore(dataCorrected, data_header) 
+                                if valid and messages:
+                                    if dataCorrected:
+                                        data_header = dataCorrected.pop(0)
+                                        out = format_records_datastore(dataCorrected, data_header) 
+                                        csv_file_arr[resource['url']] = out
+                                        self._save_object_error('The file for resource {0} is valid with following changes {1}.'.format(resource['name'], messages), harvest_object, 'Import')
+                                 
+                                if valid and not messages:
+                                    reader = csv.reader(csv_file)  
+                                    data_header = next(reader, None)
+                                    out = format_records_datastore(reader, data_header)
                                     csv_file_arr[resource['url']] = out
-                                    self._save_object_error('The file for resource {0} is valid with following changes {1}.'.format(resource['name'], messages), harvest_object, 'Import')
-                                    
-                            if not valid:
-                                log.error('%s: USGIN document is not valid' % resource['name'])
-                                self._save_object_error('{0} USGIN document is not valid'.format(resource['name']), harvest_object, 'Import')
-                                error_exists = True
                                         
-                            log.info("End USGIN content model validation")
+                                if not valid:
+                                    log.error('%s: USGIN document is not valid' % resource['name'])
+                                    self._save_object_error('{0} USGIN document is not valid'.format(resource['name']), harvest_object, 'Import')
+                                        
+                            else:
+                                self._save_object_error('csv file does not have valid tags for resource {0}.'.format(resource['name']), harvest_object, 'Import')
                             
-                        else:
-                            self._save_object_error('{0} the file format is not supported for resource {1}.'.format(resource['format'], resource['name']), harvest_object, 'Import')
-                            error_exists = True
-                       
-                    if error_exists:
-                        return False
+                            log.info("End USGIN content model validation")
+                           
                 
         if not package_dict:
             log.error('No package dict returned, aborting import for object {0}'.format(harvest_object.id))
